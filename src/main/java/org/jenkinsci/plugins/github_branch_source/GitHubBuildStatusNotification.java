@@ -39,11 +39,13 @@ import hudson.model.listeners.SCMListener;
 import hudson.model.queue.QueueListener;
 import hudson.scm.SCM;
 import hudson.scm.SCMRevisionState;
+
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+
 import jenkins.model.Jenkins;
 import jenkins.plugins.git.AbstractGitSCMSource.SCMRevisionImpl;
 import jenkins.scm.api.SCMHead;
@@ -51,38 +53,27 @@ import jenkins.scm.api.SCMHeadObserver;
 import jenkins.scm.api.SCMRevision;
 import jenkins.scm.api.SCMRevisionAction;
 import jenkins.scm.api.SCMSource;
+import jenkins.scm.api.trait.SCMTrait;
 import org.jenkinsci.plugins.displayurlapi.DisplayURLProvider;
 import org.kohsuke.github.GHCommitState;
 import org.kohsuke.github.GHRepository;
 import org.kohsuke.github.GitHub;
 
-
 /**
  * Manages GitHub Statuses.
- *
+ * <p>
  * Job (associated to a PR) scheduled: PENDING
  * Build doing a checkout: PENDING
  * Build done: SUCCESS, FAILURE or ERROR
- *
  */
 public class GitHubBuildStatusNotification {
 
     private static final Logger LOGGER = Logger.getLogger(GitHubBuildStatusNotification.class.getName());
 
-    private static void createCommitStatus(@NonNull GHRepository repo, @NonNull String revision,
+    private static void createCommitStatus(String context, @NonNull GHRepository repo, @NonNull String revision,
                                            @NonNull GHCommitState state, @NonNull String url, @NonNull String message,
                                            @NonNull SCMHead head) throws IOException {
-        LOGGER.log(Level.FINE, "{0}/commit/{1} {2} from {3}", new Object[] {repo.getHtmlUrl(), revision, state, url});
-        String context;
-        if (head instanceof PullRequestSCMHead) {
-            if (((PullRequestSCMHead) head).isMerge()) {
-                context = "continuous-integration/jenkins/pr-merge";
-            } else {
-                context = "continuous-integration/jenkins/pr-head";
-            }
-        } else {
-            context = "continuous-integration/jenkins/branch";
-        }
+        LOGGER.log(Level.FINE, "{0}/commit/{1} {2} from {3}", new Object[]{repo.getHtmlUrl(), revision, state, url});
         repo.createCommitStatus(revision, state, url, message, context);
     }
 
@@ -110,18 +101,18 @@ public class GitHubBuildStatusNotification {
                             String revisionToNotify = resolveHeadCommit(revision);
                             SCMHead head = revision.getHead();
                             if (Result.SUCCESS.equals(result)) {
-                                createCommitStatus(repo, revisionToNotify, GHCommitState.SUCCESS, url, Messages.GitHubBuildStatusNotification_CommitStatus_Good(), head);
+                                createCommitStatus(getSCMSourceContext(build.getParent()),repo, revisionToNotify, GHCommitState.SUCCESS, url, Messages.GitHubBuildStatusNotification_CommitStatus_Good(), head);
                             } else if (Result.UNSTABLE.equals(result)) {
-                                createCommitStatus(repo, revisionToNotify, GHCommitState.FAILURE, url, Messages.GitHubBuildStatusNotification_CommitStatus_Unstable(), head);
+                                createCommitStatus(getSCMSourceContext(build.getParent()),repo, revisionToNotify, GHCommitState.FAILURE, url, Messages.GitHubBuildStatusNotification_CommitStatus_Unstable(), head);
                             } else if (Result.FAILURE.equals(result)) {
-                                createCommitStatus(repo, revisionToNotify, GHCommitState.ERROR, url, Messages.GitHubBuildStatusNotification_CommitStatus_Failure(), head);
+                                createCommitStatus(getSCMSourceContext(build.getParent()),repo, revisionToNotify, GHCommitState.ERROR, url, Messages.GitHubBuildStatusNotification_CommitStatus_Failure(), head);
                             } else if (Result.ABORTED.equals(result)) {
-                                createCommitStatus(repo, revisionToNotify, GHCommitState.ERROR, url, Messages.GitHubBuildStatusNotification_CommitStatus_Aborted(), head);
+                                createCommitStatus(getSCMSourceContext(build.getParent()),repo, revisionToNotify, GHCommitState.ERROR, url, Messages.GitHubBuildStatusNotification_CommitStatus_Aborted(), head);
                             } else if (result != null) { // NOT_BUILT etc.
-                                createCommitStatus(repo, revisionToNotify, GHCommitState.ERROR, url, Messages.GitHubBuildStatusNotification_CommitStatus_Other(), head);
+                                createCommitStatus(getSCMSourceContext(build.getParent()),repo, revisionToNotify, GHCommitState.ERROR, url, Messages.GitHubBuildStatusNotification_CommitStatus_Other(), head);
                             } else {
                                 ignoreError = true;
-                                createCommitStatus(repo, revisionToNotify, GHCommitState.PENDING, url, Messages.GitHubBuildStatusNotification_CommitStatus_Pending(), head);
+                                createCommitStatus(getSCMSourceContext(build.getParent()),repo, revisionToNotify, GHCommitState.PENDING, url, Messages.GitHubBuildStatusNotification_CommitStatus_Pending(), head);
                             }
                             if (result != null) {
                                 listener.getLogger().format("%n" + Messages.GitHubBuildStatusNotification_CommitStatusSet() + "%n%n");
@@ -155,6 +146,19 @@ public class GitHubBuildStatusNotification {
         }
     }
 
+    private static String getSCMSourceContext(Job<?, ?> job) {
+        SCMSource src = SCMSource.SourceByItem.findSource(job);
+        if (src instanceof GitHubSCMSource) {
+            GitHubSCMSource source = (GitHubSCMSource) src;
+            for (SCMTrait<?> trait : source.getTraits()) {
+                if (trait instanceof GitHubContextSetter) {
+                    return ((GitHubContextSetter) trait).getContext();
+                }
+            }
+        }
+        return "jenkins-build";
+    }
+
     /**
      * Returns the GitHub Repository associated to a Job.
      *
@@ -163,7 +167,7 @@ public class GitHubBuildStatusNotification {
      * @throws IOException
      */
     @CheckForNull
-    private static GHRepository lookUpRepo(GitHub github, @NonNull Job<?,?> job) throws IOException {
+    private static GHRepository lookUpRepo(GitHub github, @NonNull Job<?, ?> job) throws IOException {
         if (github == null) {
             return null;
         }
@@ -186,7 +190,8 @@ public class GitHubBuildStatusNotification {
      * @throws IOException
      */
     @CheckForNull
-    private static GitHub lookUpGitHub(@NonNull Job<?,?> job) throws IOException {
+    private static GitHub lookUpGitHub(@NonNull Job<?, ?> job) throws IOException {
+
         SCMSource src = SCMSource.SourceByItem.findSource(job);
         if (src instanceof GitHubSCMSource) {
             GitHubSCMSource source = (GitHubSCMSource) src;
@@ -219,7 +224,7 @@ public class GitHubBuildStatusNotification {
                 return;
             }
             final long taskId = wi.getId();
-            final Job<?,?> job = (Job) wi.task;
+            final Job<?, ?> job = (Job) wi.task;
             final SCMSource source = SCMSource.SourceByItem.findSource(job);
             if (!(source instanceof GitHubSCMSource)) {
                 return;
@@ -268,7 +273,7 @@ public class GitHubBuildStatusNotification {
                                     // status. JobCheckOutListener is now responsible for setting the pending status.
                                     return;
                                 }
-                                createCommitStatus(repo, hash, GHCommitState.PENDING, url,
+                                createCommitStatus(getSCMSourceContext(job),repo, hash, GHCommitState.PENDING, url,
                                         Messages.GitHubBuildStatusNotification_CommitStatus_Queued(), head);
                             }
                         } finally {
@@ -316,7 +321,7 @@ public class GitHubBuildStatusNotification {
      * Possible options: GHCommitState.SUCCESS, GHCommitState.ERROR or GHCommitState.FAILURE
      */
     @Extension
-    public static class JobCompletedListener extends RunListener<Run<?,?>> {
+    public static class JobCompletedListener extends RunListener<Run<?, ?>> {
 
         @Override
         public void onCompleted(Run<?, ?> build, TaskListener listener) {
@@ -335,6 +340,7 @@ public class GitHubBuildStatusNotification {
         }
     }
 
-    private GitHubBuildStatusNotification() {}
+    private GitHubBuildStatusNotification() {
+    }
 
 }
